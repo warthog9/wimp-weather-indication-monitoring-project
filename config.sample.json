@@ -1,0 +1,12 @@
+{
+	"wifi": {
+		"ssid": "my_ssid",
+		"password": "totes secure password"
+	},
+	"mqtt": {
+		"broker": "mqtt.example.com",
+		"port": 1883,
+		"user": "wimp",
+		"password": "use apg to generate something long"
+	}
+}
