@@ -6,8 +6,8 @@
 # main.py
 
 from time import sleep
-#from umqtt.simple import MQTTClient
-from umqtt.robust import MQTTClient
+from umqtt.simple import MQTTClient
+#from umqtt.robust import MQTTClient
 
 import network
 # needed for home assistant auto discovery channels
@@ -83,6 +83,9 @@ ha_sensor_pms_2_5um = None
 ha_sensor_pms_5_0um = None
 ha_sensor_pms_10_0um = None
 
+sta_if = None
+ap_if = None
+
 def rain_bucket_interrupt(pin):
     global rain_bucket_count
     rain_bucket_count += 1
@@ -124,30 +127,50 @@ def as3935_interrupt(pin):
 def do_connect():
     global hostname
     global config
+    global sta_if
+    global ap_if
 
-    sta_if = network.WLAN(network.STA_IF)
-    ap_if  = network.WLAN(network.AP_IF)
+    if sta_if is None:
+        sta_if = network.WLAN(network.STA_IF)
+
+    if ap_if is None:
+        ap_if  = network.WLAN(network.AP_IF)
+
     if not sta_if.isconnected():
         print('connecting to network...')
+        print("Using hostname: {}".format( hostname ) )
         sta_if.active(True)
-        sta_if.config(dhcp_hostname=hostname)
-        sta_if.connect(
-                config['wifi']['ssid'],
-                config['wifi']['password']
-                )
-        while not sta_if.isconnected():
-            if not ap_if.active():
-                ap_if.active(True)
-                ap_if.config(essid='wimp-ap', password='fallbacks are good 2022' )
-                while ap_if.active() == False:
-                    pass
-                print('AP mode active')
-            pass
-        print('Shutting down AP')
-        ap_if.active(False)
+        print( "Station Interface - now active" )
+        try:
+            sta_if.config(dhcp_hostname=hostname)
+        except Exception as e:
+            print( "Setting hostname did not go well - {} - {}".format( hostname, e ) )
+        print( "Station Hostname set" )
+
+        print( "Setting Wifi - {} / {}".format( config['wifi']['ssid'], config['wifi']['password'] ) )
+
+        try:
+            sta_if.connect(
+                    config['wifi']['ssid'],
+                    config['wifi']['password']
+                    )
+        except OSError as e:
+            print("Wifi connection error" )
+            print( e )
+
+        if not sta_if.isconnected() and not ap_if.active():
+            ap_if.active(True)
+            ap_if.config(essid='wimp-ap', password='fallbacks are good 2022' )
+            print('AP mode active')
+
+        if sta_if.isconnected():
+            print('network config:', sta_if.ifconfig())
     else:
         print('still connected to wifi...')
-    print('network config:', sta_if.ifconfig())
+        if ap_if.active():
+            print( "Ohhhhh we are connected, we don't need the AP up anymore" )
+            print('Shutting down AP')
+            ap_if.active(False)
 
 def pms_callback():
     global pms_data_sum
@@ -244,9 +267,24 @@ def publish(topic, value):
     global mqttclient
     global mqtt_failed
     global topic_base
+    global sta_if
+    global ap_if
 
     print( 'attempting to publish to: '+ topic )
     #print( 'attempting to publish to'+ topic +' - '+ value)
+
+    if not sta_if.isconnected():
+        print( "Not connected as a Wifi client, this won't work - returning early" )
+        return
+
+    if mqtt_failed:
+        try:
+            mqttclient.connect()
+            mqtt_failed = False
+        except Excetion as e:
+            print( "mqtt already marked as failed, and reconnect bailing early" )
+            mqtt_failed = True
+            return
 
     try:
         mqttclient.publish(
@@ -255,28 +293,9 @@ def publish(topic, value):
                 )
         mqtt_failed = False
     except:
-        print(topic +': mqtt failed')
+        print(topic +': mqtt failed - disconnecting')
         mqtt_failed = True
-
-windSpeedPin.irq(trigger=Pin.IRQ_RISING, handler=windspeed_interrupt)
-rainBucketPin.irq(trigger=Pin.IRQ_RISING, handler=rain_bucket_interrupt)
-as3935IntPin.irq(trigger=Pin.IRQ_RISING, handler=as3935_interrupt)
-
-do_connect()
-
-# Ok this is where we start running the loop
-# but we need to start with an initial sleep
-
-time_sleep = 10
-
-time_last = time.time_ns()
-#sleep( time_sleep )
-
-# bme_values[0]: 2688 - 26.88C
-# windDir: 113
-# Wind Speed: 0.000000km/h
-# Rain dropped: 0.000000mm
-# Battery: 4.477411
+        mqttclient.disconnect()
 
 def publish_hass_config():
     global ha_sensor_bme280_temp
@@ -592,6 +611,54 @@ def publish_hass_config():
             )
 
 
+try:
+    windSpeedPin.irq(trigger=Pin.IRQ_RISING, handler=windspeed_interrupt)
+except Exception as e:
+    print( "windSpeedPin couldn't be setup - {}".format( e ) )
+
+try:
+    rainBucketPin.irq(trigger=Pin.IRQ_RISING, handler=rain_bucket_interrupt)
+except Exception as e:
+    print( "rainBucketPin couldn't be setup - {}".format( e ) )
+
+try:
+    as3935IntPin.irq(trigger=Pin.IRQ_RISING, handler=as3935_interrupt)
+except Exception as e:
+    print( "as3935IntPin couldn't be setup - {}".format( e ) )
+
+print( "Initial connection attempt" )
+print( "sta_if: {}".format( sta_if ) )
+if not sta_if is None:
+    print( "connected: {}".format( sta_if.isconnected() ) )
+
+while True:
+    if not sta_if is None and sta_if.isconnected():
+        break
+
+    if not sta_if is None:
+        print( "Retrying conncting.." )
+
+    print( "Connecting..." )
+    do_connect()
+    sleep( 10 )
+
+print( "Clearly made it out of connecting..." )
+print('network config:', sta_if.ifconfig())
+
+# Ok this is where we start running the loop
+# but we need to start with an initial sleep
+
+time_sleep = 10
+
+time_last = time.time_ns()
+#sleep( time_sleep )
+
+# bme_values[0]: 2688 - 26.88C
+# windDir: 113
+# Wind Speed: 0.000000km/h
+# Rain dropped: 0.000000mm
+# Battery: 4.477411
+
 
 # Home Assistant reporting pieces
 #   Note: HA, mostly, doesn't support wind direction which seems shockingly dumb
@@ -685,39 +752,48 @@ async def main():
         try:
             mqttclient.check_msg()
         except Exception as e:
-            print("Something went wrong with the mqtt check_msg - %s" % ( str(e) ) )
+            print("Something went wrong with the mqtt check_msg - {}".format( e ) )
 
-        bme_values = bme.values_no_units()
+        try:
+            bme_values = bme.values_no_units()
 
-        print("bme_values[0]: %s - %s - %s" % ( bme_values[0], bme_values[1], bme_values[2] ) )
-        #if( bme_values[0] < 20 ):
-        #    print("***ERROR***")
-        #    error_state = True
+            print("bme_values[0]: %s - %s - %s" % ( bme_values[0], bme_values[1], bme_values[2] ) )
+            #if( bme_values[0] < 20 ):
+            #    print("***ERROR***")
+            #    error_state = True
 
-        publish( "sensors/temperature_C", bytes( bme_values[0], 'utf-8' ) )
-        ha_sensor_bme280_temp.setState(float(bme_values[0]))
+            publish( "sensors/temperature_C", bytes( bme_values[0], 'utf-8' ) )
+            ha_sensor_bme280_temp.setState(float(bme_values[0]))
 
-        publish( "sensors/pressure", bytes( bme_values[1], 'utf-8' ) )
-        ha_sensor_bme280_pressure.setState(float(bme_values[1]))
+            publish( "sensors/pressure", bytes( bme_values[1], 'utf-8' ) )
+            ha_sensor_bme280_pressure.setState(float(bme_values[1]))
 
-        publish( "sensors/humidity", bytes( bme_values[2], 'utf-8' ) )
-        ha_sensor_bme280_humidity.setState(float(bme_values[2]))
+            publish( "sensors/humidity", bytes( bme_values[2], 'utf-8' ) )
+            ha_sensor_bme280_humidity.setState(float(bme_values[2]))
+        except Exception as e:
+            print( "Something Wrong with publishing BMEx80 values - {}".format( e ) )
 
-        # ok lets do the veml6075 uva / uvb / uv_index sensor
+        try:
+            # ok lets do the veml6075 uva / uvb / uv_index sensor
 
-        publish( "sensors/uva", bytes( str(veml6075.uva), 'utf-8' ) )
-        ha_sensor_veml6075_uva.setState(float(veml6075.uva))
+            publish( "sensors/uva", bytes( str(veml6075.uva), 'utf-8' ) )
+            ha_sensor_veml6075_uva.setState(float(veml6075.uva))
 
-        publish( "sensors/uvb", bytes( str(veml6075.uvb), 'utf-8' ) )
-        ha_sensor_veml6075_uvb.setState(float(veml6075.uvb))
+            publish( "sensors/uvb", bytes( str(veml6075.uvb), 'utf-8' ) )
+            ha_sensor_veml6075_uvb.setState(float(veml6075.uvb))
 
-        publish( "sensors/uv_index", bytes( str(veml6075.uv_index), 'utf-8' ) )
-        ha_sensor_veml6075_uv_index.setState(float(veml6075.uv_index))
+            publish( "sensors/uv_index", bytes( str(veml6075.uv_index), 'utf-8' ) )
+            ha_sensor_veml6075_uv_index.setState(float(veml6075.uv_index))
+        except Exception as e:
+            print( "Something Wrong with publishing veml6075 values - {}".format( e ) )
 
-        windDir = getWindDirection()
-        print("windDir: %d" % ( windDir ) )
-        publish( "sensors/wind_direction", str(windDir) )
-        ha_sensor_wind_dir.setState(float(windDir))
+        try:
+            windDir = getWindDirection()
+            print("windDir: %d" % ( windDir ) )
+            publish( "sensors/wind_direction", str(windDir) )
+            ha_sensor_wind_dir.setState(float(windDir))
+        except Exception as e:
+            print( "Something Wrong with publishing windDir values - {}".format( e ) )
 
         # Ok lets deal with the wind speed and rain gauge
         # According to the datasheet
@@ -772,121 +848,132 @@ async def main():
         publish( "sensors/rain_fall_mm", str(rain_mm) )
         ha_sensor_rain.setState(float(rain_mm))
 
-        # calibrating the 5V based on actual readings
-        battery_max = 4.38
-        battery_min = 2.58
-        battery_carrier_voltage = ( battery_carrierADC.read() / 4095 ) * 5.637982196
-        battery_percent = (
-                (
-                    battery_carrier_voltage - battery_min
-                ) / (
-                    battery_max - battery_min
-                )
-            ) * 100
-        print("Battery: "+ str( battery_carrier_voltage ) +" - "+ str(battery_percent) +"%")
-        publish( "sensors/battery_carrier_v", str(battery_carrier_voltage) )
-        ha_sensor_battery_volt.setState(battery_carrier_voltage)
-        publish( "sensors/battery_carrier_percent", str(battery_carrier_voltage) )
-        ha_sensor_battery.setState(battery_percent)
+        try:
+            # calibrating the 5V based on actual readings
+            battery_max = 4.38
+            battery_min = 2.58
+            battery_carrier_voltage = ( battery_carrierADC.read() / 4095 ) * 5.637982196
+            battery_percent = (
+                    (
+                        battery_carrier_voltage - battery_min
+                    ) / (
+                        battery_max - battery_min
+                    )
+                ) * 100
+            print("Battery: "+ str( battery_carrier_voltage ) +" - "+ str(battery_percent) +"%")
+            publish( "sensors/battery_carrier_v", str(battery_carrier_voltage) )
+            ha_sensor_battery_volt.setState(battery_carrier_voltage)
+            publish( "sensors/battery_carrier_percent", str(battery_carrier_voltage) )
+            ha_sensor_battery.setState(battery_percent)
+        except Exception as e:
+            print( "Something Wrong with publishing battery values - {}".format( e ) )
 
+        try:
+            print("Lightning Count: %d" % ( as3935_count ) )
+            publish( "sensors/lightning_count", str(as3935_count) )
+            ha_sensor_as3935_events.setState(int(as3935_count))
 
-        print("Lightning Count: %d" % ( as3935_count ) )
-        publish( "sensors/lightning_count", str(as3935_count) )
-        ha_sensor_as3935_events.setState(int(as3935_count))
+            print("Lightning Energy: %d" % ( as3935_energy ) )
+            publish( "sensors/lightning_energy", str(as3935_energy) )
+            ha_sensor_as3935_energy.setState(int(as3935_energy))
 
-        print("Lightning Energy: %d" % ( as3935_energy ) )
-        publish( "sensors/lightning_energy", str(as3935_energy) )
-        ha_sensor_as3935_energy.setState(int(as3935_energy))
+            print("Lightning Distance: %f" % ( as3935_distance ) )
+            publish( "sensors/lightning_distance", str(as3935_distance) )
+            ha_sensor_as3935_distance.setState(float(as3935_distance))
 
-        print("Lightning Distance: %f" % ( as3935_distance ) )
-        publish( "sensors/lightning_distance", str(as3935_distance) )
-        ha_sensor_as3935_distance.setState(float(as3935_distance))
+            print("Lightning False Count: %d" % ( as3935_false_count ) )
+            publish( "sensors/lightning_false_count", str(as3935_false_count) )
+            ha_sensor_as3935_false_count.setState(int(as3935_false_count))
 
-        print("Lightning False Count: %d" % ( as3935_false_count ) )
-        publish( "sensors/lightning_false_count", str(as3935_false_count) )
-        ha_sensor_as3935_false_count.setState(int(as3935_false_count))
+            as3935_count = 0
+            as3935_false_count = 0
+            as3935_distance = -1
+            as3935_energy = 0
+        except Exception as e:
+            print( "Something Wrong with publishing as3935 values - {}".format( e ) )
 
-        as3935_count = 0
-        as3935_false_count = 0
-        as3935_distance = -1
-        as3935_energy = 0
+        try:
+            soil_moisture = readSoil()
+            print("Soil Moisture: %f" % ( float(soil_moisture) ) )
+            publish( "sensors/soil_moisture", str(soil_moisture) )
+            ha_sensor_soil_moisture.setState(float(soil_moisture))
+        except Exception as e:
+            print( "Something Wrong with publishing soil moisture values - {}".format( e ) )
 
-        soil_moisture = readSoil()
-        print("Soil Moisture: %f" % ( float(soil_moisture) ) )
-        publish( "sensors/soil_moisture", str(soil_moisture) )
-        ha_sensor_soil_moisture.setState(float(soil_moisture))
+        try:
+            #
+            # PMS sensors here
+            #
 
-        #
-        # PMS sensors here
-        #
+            if pms_count > 0:
+                # only need to send this if we've actually gotten
+                # pms data
 
-        if pms_count > 0:
-            # only need to send this if we've actually gotten
-            # pms data
+                pms_data = pms_data_sum
+                pms_lcount = pms_count
+                pms_data_sum = ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 )
+                pms_count = 0
 
-            pms_data = pms_data_sum
-            pms_lcount = pms_count
-            pms_data_sum = ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 )
-            pms_count = 0
+                if pms_lcount is 0:
+                    pms_data = ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 )
+                else:
+                    pms_data = tuple([ x / pms_lcount for x in pms_data ])
 
-            if pms_lcount is 0:
-                pms_data = ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 )
-            else:
-                pms_data = tuple([ x / pms_lcount for x in pms_data ])
+                print( "pms_data: %s " %( pms_data, ) )
 
-            print( "pms_data: %s " %( pms_data, ) )
+                print( "pms_data[0] ")
+                #publish( "sensors/pms_5003_1_0std", bytes( pms_data[0], 'utf-8' ) )
+                ha_sensor_pms_1_0std.setState(float(pms_data[0]))
 
-            print( "pms_data[0] ")
-            #publish( "sensors/pms_5003_1_0std", bytes( pms_data[0], 'utf-8' ) )
-            ha_sensor_pms_1_0std.setState(float(pms_data[0]))
+                print( "pms_data[1] ")
+                #publish( "sensors/pms_5003_2_5std", bytes( pms_data[1], 'utf-8' ) )
+                ha_sensor_pms_2_5std.setState(float(pms_data[1]))
 
-            print( "pms_data[1] ")
-            #publish( "sensors/pms_5003_2_5std", bytes( pms_data[1], 'utf-8' ) )
-            ha_sensor_pms_2_5std.setState(float(pms_data[1]))
+                print( "pms_data[2] ")
+                #publish( "sensors/pms_5003_10_0std", bytes( pms_data[2], 'utf-8' ) )
+                ha_sensor_pms_10_0std.setState(float(pms_data[2]))
 
-            print( "pms_data[2] ")
-            #publish( "sensors/pms_5003_10_0std", bytes( pms_data[2], 'utf-8' ) )
-            ha_sensor_pms_10_0std.setState(float(pms_data[2]))
+                print( "pms_data[3] ")
+                #publish( "sensors/pms_5003_1_0atmo", bytes( pms_data[3], 'utf-8' ) )
+                ha_sensor_pms_1_0atmo.setState(float(pms_data[3]))
 
-            print( "pms_data[3] ")
-            #publish( "sensors/pms_5003_1_0atmo", bytes( pms_data[3], 'utf-8' ) )
-            ha_sensor_pms_1_0atmo.setState(float(pms_data[3]))
+                print( "pms_data[4] ")
+                #publish( "sensors/pms_5003_2_5atmo", bytes( pms_data[4], 'utf-8' ) )
+                ha_sensor_pms_2_5atmo.setState(float(pms_data[4]))
 
-            print( "pms_data[4] ")
-            #publish( "sensors/pms_5003_2_5atmo", bytes( pms_data[4], 'utf-8' ) )
-            ha_sensor_pms_2_5atmo.setState(float(pms_data[4]))
+                print( "pms_data[5] ")
+                #publish( "sensors/pms_5003_10_0atmo", bytes( pms_data[5], 'utf-8' ) )
+                ha_sensor_pms_10_0atmo.setState(float(pms_data[5]))
 
-            print( "pms_data[5] ")
-            #publish( "sensors/pms_5003_10_0atmo", bytes( pms_data[5], 'utf-8' ) )
-            ha_sensor_pms_10_0atmo.setState(float(pms_data[5]))
+                print( "pms_data[6] ")
+                #publish( "sensors/pms_5003_0_3um", bytes( pms_data[6], 'utf-8' ) )
+                ha_sensor_pms_0_3um.setState(float(pms_data[6]))
 
-            print( "pms_data[6] ")
-            #publish( "sensors/pms_5003_0_3um", bytes( pms_data[6], 'utf-8' ) )
-            ha_sensor_pms_0_3um.setState(float(pms_data[6]))
+                print( "pms_data[7] ")
+                #publish( "sensors/pms_5003_0_5um", bytes( pms_data[7], 'utf-8' ) )
+                ha_sensor_pms_0_5um.setState(float(pms_data[7]))
 
-            print( "pms_data[7] ")
-            #publish( "sensors/pms_5003_0_5um", bytes( pms_data[7], 'utf-8' ) )
-            ha_sensor_pms_0_5um.setState(float(pms_data[7]))
+                print( "pms_data[8] ")
+                #publish( "sensors/pms_5003_1_0um", bytes( pms_data[8], 'utf-8' ) )
+                ha_sensor_pms_1_0um.setState(float(pms_data[8]))
 
-            print( "pms_data[8] ")
-            #publish( "sensors/pms_5003_1_0um", bytes( pms_data[8], 'utf-8' ) )
-            ha_sensor_pms_1_0um.setState(float(pms_data[8]))
+                print( "pms_data[9] ")
+                #publish( "sensors/pms_5003_2_5um", bytes( pms_data[9], 'utf-8' ) )
+                ha_sensor_pms_2_5um.setState(float(pms_data[9]))
 
-            print( "pms_data[9] ")
-            #publish( "sensors/pms_5003_2_5um", bytes( pms_data[9], 'utf-8' ) )
-            ha_sensor_pms_2_5um.setState(float(pms_data[9]))
+                print( "pms_data[10] ")
+                #publish( "sensors/pms_5003_5_0um", bytes( pms_data[10], 'utf-8' ) )
+                ha_sensor_pms_5_0um.setState(float(pms_data[10]))
 
-            print( "pms_data[10] ")
-            #publish( "sensors/pms_5003_5_0um", bytes( pms_data[10], 'utf-8' ) )
-            ha_sensor_pms_5_0um.setState(float(pms_data[10]))
-
-            print( "pms_data[11] ")
-            #publish(
-            #    "sensors/pms_5003_10_0um",
-            #    bytes( pms_data[11], 'utf-8' )
-            #    )
-            ha_sensor_pms_10_0um.setState(float(pms_data[11]))
-        # end pms_count > 0
+                print( "pms_data[11] ")
+                #publish(
+                #    "sensors/pms_5003_10_0um",
+                #    bytes( pms_data[11], 'utf-8' )
+                #    )
+                ha_sensor_pms_10_0um.setState(float(pms_data[11]))
+            # end pms_count > 0
+        except Exception as e:
+            print( "Something Wrong with publishing soil moisture values - {}".format( e ) )
 
         #
         # Clean up mqtt
@@ -902,10 +989,20 @@ async def main():
     # end while true
 # end async main()
 
-pms5003.set_debug(True)
+try:
+    pms5003.set_debug(True)
+except Exception as e:
+    print( "pms5003 error trying to set_debug() - {}".format( e ) )
 
-pms.registerCallback(pms_callback)
-asyncio.create_task(main())
+try:
+    pms.registerCallback(pms_callback)
+except Exception as e:
+    print( "Counld not create pms callback - {}".format( e ) )
+
+try:
+    asyncio.create_task(main())
+except Exception as e:
+    print( "could not setup main task... that seems like an issue" )
 
 loop=asyncio.get_event_loop()
 try:
